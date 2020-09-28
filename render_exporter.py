@@ -457,15 +457,15 @@ def export_mitsuba_emissive_material (scene_file, mat, scene):
     print('Currently exporting Mitsuba BSDF emission material')
     print (mat.name)
     
-    color = mat.inputs["Color"]
+    color = mat.inputs["Color"].default_value
     strength = mat.inputs["Strength"].default_value
 
     # <emitter type="area">
     # <spectrum name="radiance" value="1"/>
     # </emitter>
 
-    scene_file.write(f'<emitter type="area">\n')
-    scene_file.write('<rgb name="radiance" value="%s %s %s"/>\n' %(mat.inputs[0].default_value[0], mat.inputs[0].default_value[1], mat.inputs[0].default_value[2]))
+    scene_file.write('<emitter type="area">\n')
+    scene_file.write(f'<rgb name="radiance" value="{color[0]*strength} {color[1]*strength} {color[2]*strength}"/>\n') 
     scene_file.write('</emitter>\n')
     return ''
 
@@ -492,6 +492,28 @@ def exportObject_medium(scene_file, material):
             if node.name == 'Material Output':
                 export_medium(scene_file,node.inputs[1])
     return ''
+
+def export_material_cycle_node(scene_file,currentMaterial, materialName, scene):
+    """return bool if the material got exported from cycle nodes"""
+    print("export_material_node (cycle): " + currentMaterial.name)
+    if currentMaterial.bl_idname == 'ShaderNodeBsdfDiffuse':
+        reflectanceTextureName = export_texture_from_input(scene_file,currentMaterial.inputs[0], scene)
+        scene_file.write('<bsdf type="diffuse" id="%s">\n' % materialName)
+        if reflectanceTextureName == "" :
+            color = currentMaterial.inputs[0].default_value
+            scene_file.write(f'<rgb name="reflectance" value="{color[0]} {color[1]} {color[2]}"/>\n')
+        else:
+            scene_file.write('<ref id="{reflectanceTextureName}" name="reflectance"/>\n')
+        scene_file.write('</bsdf>\n')
+        return True
+    if currentMaterial.bl_idname == 'ShaderNodeBsdfGlossy':
+        color = currentMaterial.inputs[0].default_value
+        scene_file.write('<bsdf type="conductor" id="%s">\n' % materialName)
+        # TODO: Mitsuba 2 naming convension...
+        scene_file.write(f'<rgb name="specularReflectance" value="{color[0]} {color[1]} {color[2]}"/>\n')
+        scene_file.write('</bsdf>\n')
+        return True
+    return False
 
 def export_material_node(scene_file,currentMaterial, materialName, scene):
     """return bool if the material got exported"""
@@ -529,10 +551,15 @@ def export_material(scene_file, material, scene):
         #Find the surface output node, then export the connected material
         for node in material.node_tree.nodes:
             if node.name == 'Material Output':
+                # TODO: Revise this as in cycle there is serval inputs ('Displacement', 'Surface', 'Volume')
                 for input in node.inputs:
                     for node_links in input.links:
                         currentMaterial =  node_links.from_node
-                        return export_material_node(scene_file,currentMaterial, material.name, scene)
+                        material_exported = export_material_node(scene_file,currentMaterial, material.name, scene)
+                        if not material_exported:
+                            # We try now from cycle... 
+                            material_exported = export_material_cycle_node(scene_file, currentMaterial, material.name, scene)
+                        return material_exported
     return False
 
 def createDefaultExportDirectories(scene_file, scene):
@@ -574,7 +601,9 @@ def export_gometry_as_obj(scene_file, scene, frameNumber):
                     if material.name not in exportedMaterials:
                         material_exported = export_material(scene_file, material, scene)
                         exportedMaterials.append(material.name)
-
+                    else:
+                        # We already exported the material
+                        material_exported = True
                 # Export the object 
                 objFolderPath = bpy.path.abspath(bpy.data.scenes[0].exportpath + 'meshes/' + frameNumber + '/')
                 if not os.path.exists(objFolderPath):
