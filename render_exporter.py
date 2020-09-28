@@ -6,6 +6,68 @@ from math import *
 import mathutils
 from mathutils import Vector
 import shutil
+import struct
+
+def write_ply(file, mesh, indices, normals, i):
+
+    # Pack U,V
+    uvs = []
+    for uv_layer in mesh.uv_layers:
+        for tri in mesh.loop_triangles:
+            if tri.material_index == i:
+                for loop_index in tri.loops:
+                    uvs.append((
+                        uv_layer.data[loop_index].uv[0],
+                        uv_layer.data[loop_index].uv[1]
+                    ))
+
+    out = open(file, 'w')
+    out.write("ply\n")
+    out.write("format binary_little_endian 1.0\n")
+    out.write(f"element vertex {len(indices)}\n")
+    out.write("property float x\n")
+    out.write("property float y\n")
+    out.write("property float z\n")
+    out.write("property float nx\n")
+    out.write("property float ny\n")
+    out.write("property float nz\n")
+    # TODO: Check UV have same size than indices, normals
+    if len(uvs) != 0:
+        out.write("property float u\n")
+        out.write("property float v\n")
+    out.write(f"element face {len(indices) // 3}\n")
+    # TODO: Check size and switch to proper precision
+    out.write("property list uint int vertex_indices\n")
+    out.write("end_header\n")
+
+    # Now switch to binary writing
+    out.close()
+    out = open(file, "ab")
+    # Position & Normals & UVs
+    for (id,(id_vertex,n)) in enumerate(zip(indices, normals)):
+        out.write(struct.pack('<f', mesh.vertices[id_vertex].co.x))
+        out.write(struct.pack('<f', mesh.vertices[id_vertex].co.y))
+        out.write(struct.pack('<f', mesh.vertices[id_vertex].co.z))
+        
+        out.write(struct.pack('<f', n[0]))
+        out.write(struct.pack('<f', n[1]))
+        out.write(struct.pack('<f', n[2]))
+
+        if len(uvs) != 0:
+            out.write(struct.pack('<f', uvs[id][0]))
+            out.write(struct.pack('<f', uvs[id][1]))
+
+    # Indices
+    for i in range(0, len(indices), 3):
+        out.write(struct.pack('<I', 3))
+        out.write(struct.pack('<I', i))
+        out.write(struct.pack('<I', i+1))
+        out.write(struct.pack('<I', i+2))
+    out.close()
+
+def matrixtostr(matrix):
+    return '%f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f '%(matrix[0][0],matrix[0][1],matrix[0][2],matrix[0][3],matrix[1][0],matrix[1][1],matrix[1][2],matrix[1][3],matrix[2][0],matrix[2][1],matrix[2][2],matrix[2][3],matrix[3][0],matrix[3][1],matrix[3][2],matrix[3][3])
+
 
 #render engine custom begin
 class MitsubaRenderEngine(bpy.types.RenderEngine):
@@ -122,7 +184,7 @@ def export_camera(scene_file, scene):
         at_point=at_point * -1
         at_point=at_point + from_point
 
-        scene_file.write('\t<sensor type="thinlens">\n')
+        scene_file.write('\t<sensor type="perspective">\n')
         export_film(scene_file, scene)
         # https://blender.stackexchange.com/questions/14745/how-do-i-change-the-focal-length-of-a-camera-with-python
         fov = bpy.data.cameras[0].angle * 180 / math.pi
@@ -391,6 +453,22 @@ def export_mitsuba_bsdf_diffuse_material (scene_file, mat, materialName, scene):
     scene_file.write('</bsdf>\n')
     return ''
 
+def export_mitsuba_emissive_material (scene_file, mat, scene):
+    print('Currently exporting Mitsuba BSDF emission material')
+    print (mat.name)
+    
+    color = mat.inputs["Color"]
+    strength = mat.inputs["Strength"].default_value
+
+    # <emitter type="area">
+    # <spectrum name="radiance" value="1"/>
+    # </emitter>
+
+    scene_file.write(f'<emitter type="area">\n')
+    scene_file.write('<rgb name="radiance" value="%s %s %s"/>\n' %(mat.inputs[0].default_value[0], mat.inputs[0].default_value[1], mat.inputs[0].default_value[2]))
+    scene_file.write('</emitter>\n')
+    return ''
+
 def getTextureInSlotName(textureSlotParam):
     srcfile = textureSlotParam
     head, tail = os.path.split(srcfile)
@@ -416,30 +494,34 @@ def exportObject_medium(scene_file, material):
     return ''
 
 def export_material_node(scene_file,currentMaterial, materialName, scene):
+    """return bool if the material got exported"""
     print("export_material_node : " + currentMaterial.name)
-    #print("export_material_node bl_idname :" + currentMaterial.bl_idname)
     if currentMaterial.bl_idname == 'MitsubaBSDFDiffuse':
         export_mitsuba_bsdf_diffuse_material(scene_file,currentMaterial, materialName, scene)
+        return True
     if currentMaterial.bl_idname == 'MitsubaBSDFPlastic':
         export_mitsuba_bsdf_plastic_material(scene_file,currentMaterial, materialName, scene)
+        return True
     if currentMaterial.bl_idname == 'MitsubaBSDFDielectric':
         export_mitsuba_bsdf_dielectric_material(scene_file,currentMaterial, materialName, scene)
+        return True
     if currentMaterial.bl_idname == 'MitsubaBlackBody':
         export_mitsuba_blackbody_material(scene_file,currentMaterial,materialName)
+        return True
     if currentMaterial.bl_idname == 'MitsubaBSDFConductor':
         export_mitsuba_conductor_material(scene_file,currentMaterial,materialName, scene)
+        return True
     if currentMaterial.bl_idname == 'MitsubaBSDFBlend':
         export_mitsuba_blend_material(scene_file, currentMaterial, materialName, scene)
-    return ''
+        return True
+    return False
 
 def export_material(scene_file, material, scene):
     if material is None:
         print("no material on object")
-        return ''
+        return False
 
     print ('Exporting material named: ', material.name)
-    global hastexture
-    hastexture = False
     currentMaterial = None
     material.use_nodes = True
     if material and material.use_nodes: #if it is using nodes
@@ -450,8 +532,8 @@ def export_material(scene_file, material, scene):
                 for input in node.inputs:
                     for node_links in input.links:
                         currentMaterial =  node_links.from_node
-                        export_material_node(scene_file,currentMaterial, material.name, scene)
-    return''
+                        return export_material_node(scene_file,currentMaterial, material.name, scene)
+    return False
 
 def createDefaultExportDirectories(scene_file, scene):
     texturePath = bpy.path.abspath(scene.exportpath + 'textures')
@@ -468,31 +550,78 @@ def export_gometry_as_obj(scene_file, scene, frameNumber):
     for object in objects:
         print("exporting:")
         print(object.name)
-
-        for i in range(len(object.material_slots)):
-            material = object.material_slots[i].material
-            if material.name not in exportedMaterials:
-                export_material(scene_file, material, scene)
-                exportedMaterials.append(material.name)
-
+    
         if object is not None and object.type != 'CAMERA' and object.type == 'MESH':
-            bpy.ops.object.select_all(action="DESELECT")
-            object.select_set(True, view_layer=scene.view_layers[0]) # 2.8+ selection method.
+            bpy.ops.object.mode_set(mode='OBJECT')
+            print('exporting object: ' + object.name)
+            bpy.context.view_layer.update()
+            object.data.update()
+            dg = bpy.context.evaluated_depsgraph_get()
+            eval_obj = object.evaluated_get(dg)
+            mesh = eval_obj.to_mesh()
+            if not mesh.loop_triangles and mesh.polygons:
+                mesh.calc_loop_triangles()
 
-            objFilePath =  bpy.path.abspath(scene.exportpath + 'meshes' + frameNumber +'/' + object.name + '.obj')
-            objFolderPath =  bpy.path.abspath(scene.exportpath + 'meshes' + frameNumber + '/')
-            if not os.path.exists(objFolderPath):
-                print('Meshes directory did not exist, creating: ')
-                print(objFolderPath)
-                os.makedirs(objFolderPath)
+            # Compute normals
+            mesh.calc_normals_split()
 
-            bpy.ops.export_scene.obj(filepath=objFilePath, use_selection=True, axis_forward='Y', axis_up='Z', use_materials=False)
-            
-            scene_file.write('<shape type="obj">\n')
-            scene_file.write('<string name="filename" value="meshes%s/%s"/>\n' % (frameNumber,object.name + '.obj'))
-            scene_file.write('<ref id="%s"/>\n' % object.material_slots[i].material.name)
-            exportObject_medium(scene_file, object.material_slots[0].material)
-            scene_file.write('</shape>\n')
+            # Export materials
+            for i in range(max(len(object.material_slots), 1)):
+                material_exported = False
+                material = None
+                if len(object.material_slots) != 0.0:
+                    material = object.material_slots[i].material
+                    if material.name not in exportedMaterials:
+                        material_exported = export_material(scene_file, material, scene)
+                        exportedMaterials.append(material.name)
+
+                # Export the object 
+                objFolderPath = bpy.path.abspath(bpy.data.scenes[0].exportpath + 'meshes/' + frameNumber + '/')
+                if not os.path.exists(objFolderPath):
+                    print('Meshes directory did not exist, creating: ')
+                    print(objFolderPath)
+                    os.makedirs(objFolderPath)
+
+                # Gather valid indices & normals
+                # For this material
+                indices = []
+                normals = []
+                for tri in mesh.loop_triangles:
+                    if tri.material_index == i:
+                        indices.extend(tri.vertices)
+                        normals.extend(tri.split_normals)
+                
+                if len(indices) == 0:
+                    continue
+                    
+                # Include the file that will be created
+                objFilePath = objFolderPath + object.name + f'_mat{i}.ply' 
+                objFilePathRel = 'meshes/' + frameNumber + '/' + object.name + f'_mat{i}.ply'
+                write_ply(objFilePath, mesh, indices, normals, i)
+                
+                # Write down info
+                scene_file.write('<shape type="ply">\n')
+                scene_file.write(f'<string name="filename" value="{objFilePathRel}"/>\n')
+                # Transform
+                scene_file.write("\t\t<transform name=\"to_world\">\n")
+                scene_file.write(f"\t\t\t<matrix value=\"{matrixtostr( object.matrix_world )}\"/>\n")
+                scene_file.write("\t\t</transform>\n")
+                
+                # Material
+                if material:
+                    if material_exported:
+                        scene_file.write('<ref id="%s"/>\n' % material.name)
+                    # Check emitters
+                    if material.use_nodes and 'Material Output' in material.node_tree.nodes:
+                        root = material.node_tree.nodes['Material Output']
+                        if root.inputs[0].is_linked:
+                            # There is a node attach to the surface
+                            # Just grab it and check if it is emission type
+                            child = root.inputs[0].links[0].from_node
+                            if child.bl_idname == 'ShaderNodeEmission':
+                                export_mitsuba_emissive_material(scene_file, child, scene)
+                    exportObject_medium(scene_file, material)
+                scene_file.write('</shape>\n')
     return ''
             
 
